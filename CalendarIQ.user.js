@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CalendarIQ
 // @namespace    CalendarIQ
-// @version      0.3.1
+// @version      0.3.2
 // @description  Torn calendar, personal events and optional Loot Rangers NPC reminders in the profile menu.
 // @match        https://*.torn.com/*
 // @match        https://torn.com/*
@@ -194,6 +194,15 @@
             } catch (e) { finish(reject,e); }
         });
     }
+    function npcOrder(parent, prefix, targets) {
+        const row = node('p', prefix, parent);
+        targets.forEach((npc, index) => {
+            if (index) row.appendChild(document.createTextNode(' → '));
+            const link = node('a', npc.name, row);
+            link.href = 'https://www.torn.com/loader.php?sid=attack&user2ID=' + encodeURIComponent(npc.id);
+            link.setAttribute('aria-label', 'Open ' + npc.name + ' attack page');
+        });
+    }
     function renderNpc(now) {
         const box = $('.cq-npc'); box.replaceChildren(); box.hidden = !state.npcEnabled;
         if (!state.npcEnabled) return;
@@ -212,7 +221,7 @@
             if (!n.clear && n.reason) node('p', n.reason, box);
             const targets = n.order.filter(x => x.next);
             if ((n.clear || n.attack) && targets.length) {
-                node('p', 'Attack order: ' + targets.map(x => x.name).join(' → '), box);
+                npcOrder(box, 'Attack order: ', targets);
                 if (n.attack) node('small', 'Hospital status at last check: ' + targets.map(x =>
                     x.name + (x.hospOut > n.current ? ' (in hospital)' : ' (out of hospital)')).join(', '), box);
             }
@@ -293,7 +302,7 @@
 <section class="cq-panel" hidden aria-label="CalendarIQ"><h3>CalendarIQ</h3>
 <div class="cq-tools"><button type="button" data-action="add">Add Event</button><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="settings">Settings</button><button type="button" data-action="close">Close</button></div>
 <small class="cq-status"></small><div class="cq-settings" hidden>
-<p>API, privacy &amp; script behaviour · v0.3.1</p><table><tr><td>Purpose</td><td>Calendar and NPC schedule reminders; no automated attacks, purchases, messages or other gameplay actions.</td></tr><tr><td>Key access</td><td>Public Only; torn/calendar only.</td></tr><tr><td>Storage</td><td>Key, settings, custom events, latest calendars, optional Loot Rangers schedule and dismissed reminders stored on this device in Torn local storage.</td></tr><tr><td>Sharing</td><td>Torn key sent only to api.torn.com. If enabled, CalendarIQ contacts api.lzpt.io for the public Loot Rangers schedule without your Torn key or personal events. That service receives your IP address and normal connection metadata.</td></tr></table>
+<p>API, privacy &amp; script behaviour · v0.3.2</p><table><tr><td>Purpose</td><td>Calendar and NPC schedule reminders; no automated attacks, purchases, messages or other gameplay actions.</td></tr><tr><td>Key access</td><td>Public Only; torn/calendar only.</td></tr><tr><td>Storage</td><td>Key, settings, custom events, latest calendars, optional Loot Rangers schedule and dismissed reminders stored on this device in Torn local storage.</td></tr><tr><td>Sharing</td><td>Torn key sent only to api.torn.com. If enabled, CalendarIQ contacts api.lzpt.io for the public Loot Rangers schedule without your Torn key or personal events. That service receives your IP address and normal connection metadata.</td></tr></table>
 <label><input class="cq-npc-enabled" type="checkbox">Show Loot Rangers NPC schedule and reminders</label><small>Optional third-party feed. Checks about every 5–6 minutes while Torn is visible. Amber dot within 15 minutes; green when the feed reports an attack underway.</small>
 <label>API key<input class="cq-key" type="password" autocomplete="off" placeholder="Public Only key; leave blank to keep saved key"></label>
 <label>Your Torn calendar time slot (TCT)<input class="cq-slot" type="time"></label>
@@ -453,7 +462,7 @@
         if (npcDue) {
             const box = node('div', '', alerts); box.className = 'cq-alert';
             node('strong', 'Loot Rangers — ' + npcAlert, box);
-            node('p', 'Order: ' + state.npc.order.filter(x => x.next).map(x => x.name).join(' → '), box);
+            npcOrder(box, 'Order: ', state.npc.order.filter(x => x.next));
             const dismiss = node('button', 'Dismiss', box); dismiss.type = 'button';
             const key = npcNoticeKey(npcAlert);
             dismiss.onclick = () => { state.seen[key] = now; save(); render(); };
