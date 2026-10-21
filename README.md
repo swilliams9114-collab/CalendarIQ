@@ -20,11 +20,11 @@ To enable NPC schedules: CalendarIQ → Settings → Show Loot Rangers NPC sched
 
 - Settings, personal events, dismissed reminders, keys and cached schedules stay in Torn local storage on the device. Keep the same Torn hostname to access the same storage.
 - Official calendar requests go to api.torn.com with the saved Torn key, normally every six hours.
-- Optional NPC requests go to api.lzpt.io without Torn keys or personal events, normally every 5–6 minutes while Torn is visible. The service receives normal connection metadata including your IP address.
+- Optional NPC requests use TornPDA's native HTTP bridge when available, a userscript manager's request API on desktop, or browser fetch as a fallback. They go to api.lzpt.io without Torn keys or personal events, normally every 5–6 minutes while Torn is visible. The service receives normal connection metadata including your IP address.
 - Stale NPC schedules remain visible, with NPC alerts paused after ten minutes. Failed requests preserve the last good schedule. Rate-limit responses delay retries.
 - Script activity is limited to reading schedules and displaying reminders. No automated attacks, purchases, messages, or other gameplay actions.
 - GitHub hosts the script and its updates. Shared faction-calendar integration is not included.
 
 NPC schedule data is supplied by Loot Rangers (LZPT). Community plans may change; the displayed group time is not a guaranteed individual NPC attack time.
 
-Version: 0.3.0. License: MIT (see userscript metadata).
+Version: 0.3.1. License: MIT (see userscript metadata).
