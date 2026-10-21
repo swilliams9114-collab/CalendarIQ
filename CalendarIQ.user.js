@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         CalendarIQ
 // @namespace    CalendarIQ
-// @version      0.3.0
+// @version      0.3.1
 // @description  Torn calendar, personal events and optional Loot Rangers NPC reminders in the profile menu.
 // @match        https://*.torn.com/*
 // @match        https://torn.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      api.lzpt.io
 // @homepageURL  https://github.com/swilliams9114-collab/CalendarIQ
 // @downloadURL  https://raw.githubusercontent.com/swilliams9114-collab/CalendarIQ/main/CalendarIQ.user.js
 // @updateURL    https://raw.githubusercontent.com/swilliams9114-collab/CalendarIQ/main/CalendarIQ.user.js
@@ -29,6 +30,7 @@
     if (!state || typeof state !== 'object' || Array.isArray(state)) state = {};
     state.seen = state.seen && typeof state.seen === 'object' ? state.seen : {};
     state.custom = Array.isArray(state.custom) ? state.custom : [];
+    npcError = typeof state.npcLastError === 'string' ? state.npcLastError : '';
     let busy = false, error = '', retryAt = 0, editingId = null;
     function save() {
         try { localStorage.setItem(STORE, JSON.stringify(state)); }
@@ -148,6 +150,50 @@
         return { clear:t.clear * 1000, current:t.current * 1000, attack:t.attack,
             reason:typeof t.reason === 'string' ? t.reason.slice(0,200) : '', order, updated:now };
     }
+    // Prefer TornPDA's documented bridge for external requests. Fetch is the browser fallback.
+    function requestNpc(signal) {
+        return new Promise((resolve, reject) => {
+            let finished = false, handle;
+            const finish = (fn, value) => {
+                if (finished) return;
+                finished = true; clearTimeout(timer); signal.removeEventListener('abort', cancel);
+                fn(value);
+            };
+            const cancel = () => {
+                finish(reject, new Error('NPC request cancelled or timed out'));
+                try { handle?.abort?.(); } catch (_) {}
+            };
+            const timer = setTimeout(cancel, 15000);
+            signal.addEventListener('abort', cancel, { once:true });
+            if (signal.aborted) { cancel(); return; }
+            const nativeResponse = r => {
+                if (!r || !Number.isFinite(Number(r.status))) {
+                    finish(reject, new Error('Invalid network response')); return;
+                }
+                const headers = String(r.responseHeaders || '');
+                finish(resolve, { ok:Number(r.status) >= 200 && Number(r.status) < 300, status:Number(r.status),
+                    headers:{ get:name => {
+                        const row = headers.split(/\r?\n/).find(line => line.slice(0,line.indexOf(':')).trim().toLowerCase() === name.toLowerCase());
+                        return row ? row.slice(row.indexOf(':')+1).trim() : null;
+                    } }, json:async () => JSON.parse(r.responseText) });
+            };
+            try {
+                if (typeof PDA_httpGet === 'function') {
+                    Promise.resolve(PDA_httpGet(NPC_URL, {})).then(nativeResponse, e => finish(reject,e));
+                } else if (typeof window.flutter_inappwebview?.callHandler === 'function') {
+                    Promise.resolve(window.flutter_inappwebview.callHandler('PDA_httpGet', NPC_URL, {}))
+                        .then(nativeResponse, e => finish(reject,e));
+                } else if (typeof GM_xmlhttpRequest === 'function') {
+                    handle = GM_xmlhttpRequest({ method:'GET', url:NPC_URL, anonymous:true, timeout:15000,
+                        onload:nativeResponse, onerror:() => finish(reject,new Error('NPC connection failed')),
+                        ontimeout:cancel, onabort:cancel });
+                } else {
+                    fetch(NPC_URL, { credentials:'omit', redirect:'error', referrerPolicy:'no-referrer', signal })
+                        .then(r => finish(resolve,r), e => finish(reject,e));
+                }
+            } catch (e) { finish(reject,e); }
+        });
+    }
     function renderNpc(now) {
         const box = $('.cq-npc'); box.replaceChildren(); box.hidden = !state.npcEnabled;
         if (!state.npcEnabled) return;
@@ -155,6 +201,8 @@
         const n = state.npc, fresh = npcFresh(now);
         node('small', npcBusy ? 'Checking schedule…' : npcError ||
             (n ? 'Checked: ' + new Date(n.updated).toLocaleString() : 'No schedule downloaded yet.'), box);
+        const next = Math.max(state.npcNextAt || 0, state.npcRetryAt || 0, state.npcRateLimitUntil || 0);
+        if (!npcBusy && next > now) node('small', 'Next automatic check in ' + countdown(next-now) + '. Refresh can retry after the request cooldown.', box);
         if (n) {
             if (!fresh) node('strong', 'Saved schedule is stale · NPC alerts paused', box);
             node('p', n.attack ? (fresh ? 'Group attack underway' : 'Last reported: group attack underway') :
@@ -175,9 +223,13 @@
     }
     async function refreshNpc(force = false) {
         const now = Date.now();
-        if (!state.npcEnabled || document.hidden || npcBusy || now < (state.npcRetryAt || 0) ||
-            (!force && now < (state.npcNextAt || 0))) return;
-        npcBusy = true; npcError = '';
+        if (!state.npcEnabled || document.hidden || npcBusy) return;
+        if (now < (state.npcRateLimitUntil || 0) || now < (state.npcAttemptAt || 0) + 60000 ||
+            (!force && now < Math.max(state.npcNextAt || 0, state.npcRetryAt || 0))) {
+            render(); return;
+        }
+        npcBusy = true; npcError = ''; delete state.npcLastError;
+        state.npcAttemptAt = now;
         // Persist a throttle before requesting; reloads and sibling tabs reuse it.
         state.npcRetryAt = now + 60000;
         state.npcNextAt = now + 5 * 60000 + Math.floor(Math.random() * 30000);
@@ -186,14 +238,14 @@
         const controller = new AbortController(); npcController = controller;
         const timeout = setTimeout(() => controller.abort(), 15000);
         try {
-            const response = await fetch(NPC_URL, { credentials:'omit', redirect:'error',
-                referrerPolicy:'no-referrer', signal:controller.signal });
+            const response = await requestNpc(controller.signal);
             if (!state.npcEnabled || generation !== npcGeneration) return;
             if (!response.ok) {
                 if (response.status === 429) {
                     const header = response.headers.get('Retry-After');
                     const wait = header && /^\d+$/.test(header) ? Number(header)*1000 : Date.parse(header || '')-Date.now();
-                    state.npcRetryAt = Date.now() + Math.max(15*60000, Number.isFinite(wait) ? Math.min(wait, DAY) : 0);
+                    state.npcRateLimitUntil = Date.now() + Math.max(15*60000, Number.isFinite(wait) ? Math.min(wait, DAY) : 0);
+                    state.npcRetryAt = state.npcRateLimitUntil;
                 }
                 throw new Error('HTTP ' + response.status);
             }
@@ -202,7 +254,10 @@
             state.npc = data; pruneSeen(); save();
         } catch (err) {
             if (state.npcEnabled && generation === npcGeneration) {
-                npcError = 'Loot Rangers unavailable; saved schedule retained. Will retry later.';
+                npcError = err.message === 'HTTP 429' ? 'Loot Rangers rate limit reached; waiting before retry.' :
+                    err.message === 'Invalid or outdated schedule' ? 'Loot Rangers returned an outdated schedule. Check device date/time; will retry.' :
+                    'Loot Rangers connection failed or timed out; saved schedule retained. Tap Refresh to retry after one minute.';
+                state.npcLastError = npcError;
                 state.npcRetryAt = Math.max(state.npcRetryAt || 0, Date.now() + 5*60000);
                 save();
             }
@@ -238,7 +293,7 @@
 <section class="cq-panel" hidden aria-label="CalendarIQ"><h3>CalendarIQ</h3>
 <div class="cq-tools"><button type="button" data-action="add">Add Event</button><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="settings">Settings</button><button type="button" data-action="close">Close</button></div>
 <small class="cq-status"></small><div class="cq-settings" hidden>
-<p>API, privacy &amp; script behaviour · v0.3.0</p><table><tr><td>Purpose</td><td>Calendar and NPC schedule reminders; no automated attacks, purchases, messages or other gameplay actions.</td></tr><tr><td>Key access</td><td>Public Only; torn/calendar only.</td></tr><tr><td>Storage</td><td>Key, settings, custom events, latest calendars, optional Loot Rangers schedule and dismissed reminders stored on this device in Torn local storage.</td></tr><tr><td>Sharing</td><td>Torn key sent only to api.torn.com. If enabled, CalendarIQ contacts api.lzpt.io for the public Loot Rangers schedule without your Torn key or personal events. That service receives your IP address and normal connection metadata.</td></tr></table>
+<p>API, privacy &amp; script behaviour · v0.3.1</p><table><tr><td>Purpose</td><td>Calendar and NPC schedule reminders; no automated attacks, purchases, messages or other gameplay actions.</td></tr><tr><td>Key access</td><td>Public Only; torn/calendar only.</td></tr><tr><td>Storage</td><td>Key, settings, custom events, latest calendars, optional Loot Rangers schedule and dismissed reminders stored on this device in Torn local storage.</td></tr><tr><td>Sharing</td><td>Torn key sent only to api.torn.com. If enabled, CalendarIQ contacts api.lzpt.io for the public Loot Rangers schedule without your Torn key or personal events. That service receives your IP address and normal connection metadata.</td></tr></table>
 <label><input class="cq-npc-enabled" type="checkbox">Show Loot Rangers NPC schedule and reminders</label><small>Optional third-party feed. Checks about every 5–6 minutes while Torn is visible. Amber dot within 15 minutes; green when the feed reports an attack underway.</small>
 <label>API key<input class="cq-key" type="password" autocomplete="off" placeholder="Public Only key; leave blank to keep saved key"></label>
 <label>Your Torn calendar time slot (TCT)<input class="cq-slot" type="time"></label>
@@ -262,7 +317,7 @@
     const $ = s => root.querySelector(s);
     const panel = $('.cq-panel');
     const form = $('.cq-editor');
-    function openPanel() { panel.hidden = false; render(); }
+    function openPanel() { panel.hidden = false; render(); refreshNpc(!state.npc); }
     function editEvent(event) {
         form.reset(); editingId = event?.id || null;
         $('.cq-editor-title').textContent = event ? 'Edit event' : 'Add event';
@@ -472,7 +527,7 @@
             if (!!state.npcEnabled !== enabled) {
                 npcGeneration++; npcController?.abort(); npcError = '';
                 state.npcEnabled = enabled;
-                if (!enabled) { delete state.npc; delete state.npcNextAt; delete state.npcRetryAt; }
+                if (!enabled) { delete state.npc; delete state.npcNextAt; delete state.npcLastError; }
             }
             state.slot = slot; error = ''; $('.cq-key').value = ''; save(); $('.cq-settings').hidden = true; render(); refresh(); refreshNpc();
         }
@@ -483,8 +538,10 @@
     });
     window.addEventListener('storage', e => {
         if (e.key !== STORE) return;
+        const wasEnabled = !!state.npcEnabled;
         try { const updated = JSON.parse(e.newValue || '{}'); if (updated && typeof updated === 'object') state = { ...updated, seen:updated.seen || {}, custom:Array.isArray(updated.custom) ? updated.custom : [] }; } catch (_) {}
-        npcGeneration++; npcController?.abort(); render();
+        if (wasEnabled && !state.npcEnabled) { npcGeneration++; npcController?.abort(); }
+        npcError = typeof state.npcLastError === 'string' ? state.npcLastError : ''; render();
     });
     document.addEventListener('visibilitychange', () => { watchHeader(); if (!document.hidden) { render(); refresh(); refreshNpc(); } });
     setInterval(() => { if (!document.hidden) { render(); refresh(); refreshNpc(); } }, 30000);
@@ -496,3 +553,4 @@
         document.addEventListener('DOMContentLoaded', initialize, { once:true });
     } else initialize();
 })();
+
